@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>棚卸スキャン v2.4</title>
+<link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon-192.png"><meta name="theme-color" content="#0a5cd6">
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#667;--bd:#ccd;--ac:#0a5cd6;--ok:#e6f6e6;--ng:#fde8e8;--md:#fff4d6}
+@media(prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#eee;--mut:#99a;--bd:#445;--ac:#6aa5ff;--ok:#1d3a1d;--ng:#4a2222;--md:#4a3d14}}
+*{box-sizing:border-box}body{margin:0 auto;font:16px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:6px;max-width:640px}
+button,input,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--bd);border-radius:8px;padding:8px 12px}
+button{background:var(--ac);color:#fff;border:0;min-height:44px}button.s{background:transparent;color:var(--ac);border:1px solid var(--ac)}button.d{background:#c33}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.row>*{flex:1}.top{display:flex;justify-content:space-between;align-items:center;gap:6px}
+#prog{font-weight:700}#cam{display:none;position:relative;height:15vh;min-height:84px;border-radius:8px;overflow:hidden;background:#000;margin:4px 0}
+#cam video{width:100%;height:100%;object-fit:cover}#cam::after{content:"";position:absolute;left:8%;right:8%;top:50%;border-top:2px solid rgba(255,60,60,.8)}
+table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--bd);padding:4px;text-align:left;font-size:14px}
+td input[type=number]{width:60px;padding:6px}td input[type=checkbox]{width:26px;height:26px;padding:0}td button{padding:2px 8px;min-height:32px;margin-left:4px}
+tr.一致{background:var(--ok)}tr.欠品{background:var(--ng)}tr.修正{background:var(--md)}
+.mut{color:var(--mut);font-size:13px;margin:2px 0}.warn{color:#d33;font-weight:700}.ban{padding:6px 8px;border-radius:8px;margin:4px 0;background:var(--md);font-size:14px}
+dialog{width:94%;max-width:600px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:12px;padding:12px;max-height:90vh}
+dialog input,dialog select{width:100%;margin:3px 0}dialog input[type=checkbox]{width:22px;height:22px;margin:0 8px 0 0;vertical-align:middle}
+#toast.err{background:#c33}#toast{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:20px;display:none;z-index:99}
+</style></head><body>
+<div class="top"><span id="prog">読込中…</span><button class="s" onclick="openCfg()" style="flex:none">⚙ 設定・データ</button></div>
+<div class="row"><button class="s" id="eqb" onclick="openEq()" style="text-align:left;font-size:14px"></button></div>
+<div id="cam"><video id="v" playsinline muted></video></div>
+<div class="row"><button id="camb" onclick="camToggle()" style="flex:1">カメラ読取 ON</button>
+<input id="man" placeholder="手入力 / BTリーダー" autocomplete="off" style="flex:2"></div>
+<div id="slip"></div>
+<div class="row"><button class="s" onclick="openList('u')">未確認一覧</button><button class="s" onclick="openList('c')">確認済一覧</button></div>
+<div class="row"><button class="s" onclick="openNone()">伝票なし追加</button><button class="s" onclick="openExtras()">追加記録</button></div>
+<input type="file" id="file" accept=".csv,.CSV,text/csv" multiple hidden>
+<dialog id="dlg"></dialog><dialog id="dlg2"></dialog><div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s),X=s=>$('#dlg').querySelector(s);
+let S={h:[],rows:[],extras:[],log:[],pick:{},eqSel:[],dev:''},IDX={},IDX2={},cur=null,stream=null,det=null,last='',lastT=0,camOn=false,pendK='',tmr=0;
+const ci=n=>S.h.indexOf(n),QC=()=>S.h.indexOf('工程時数量')>=0?'工程時数量':'枚数',g=(r,n)=>r.c[ci(n)]||'',now=()=>new Date().toLocaleString('sv'),
+esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])),
+num=v=>{const f=parseFloat(v);return isNaN(f)?0:f},fmt=v=>isNaN(parseFloat(v))?v:String(parseFloat(v)),
+norm=s=>String(s).replace(/[\u00a0\u3000]/g,' ').replace(/\s+$/,''),
+eqList=()=>[...new Set(S.rows.map(r=>r.eq))],multi=()=>eqList().length>1;
+function toast(m,ms,err){const t=$('#toast');t.textContent=m;t.className=err?'err':'';t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',ms||2600)}
+/* ---- 保存(IndexedDB。大量データ対応) ---- */
+const db=new Promise((res,rej)=>{const r=indexedDB.open('tana2',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const kvGet=k=>db.then(d=>new Promise((res,rej)=>{const q=d.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)}));
+const kvSet=(k,v)=>db.then(d=>new Promise((res,rej)=>{const t=d.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=res;t.onerror=()=>rej(t.error)}));
+const kvDel=()=>db.then(d=>new Promise(res=>{const t=d.transaction('kv','readwrite');t.objectStore('kv').clear();t.oncomplete=res}));
+function save(){clearTimeout(tmr);tmr=setTimeout(saveNow,250)}
+function saveNow(){const marks={};S.rows.forEach((r,i)=>{if(r.k||r.n!=null||r.as||r.d)marks[i]={n:r.n,k:r.k,st:r.st,t:r.t,as:r.as,d:r.d}});
+ return kvSet('mark',{marks,extras:S.extras,log:S.log,pick:S.pick,eqSel:S.eqSel,dev:S.dev}).catch(()=>toast('保存に失敗しました'))}
+const newRow=(c,eq)=>({c,eq,n:null,k:false,st:'未確認',t:'',as:'',d:''});
+async function init(){try{const b=await kvGet('base');if(b){S.h=b.h;S.rows=b.rows.map(x=>newRow(x.c,x.eq));const m=await kvGet('mark');
+ if(m){Object.entries(m.marks||{}).forEach(([i,v])=>{if(S.rows[i])Object.assign(S.rows[i],v)});['extras','log','pick','eqSel','dev'].forEach(f=>{if(m[f]!==undefined)S[f]=m[f]})}}}
+ catch(e){toast('保存データを読み込めませんでした')}build();head();renderSlip()}
+/* ---- CSV ---- */
+function parseCSV(t){const R=[];let r=[],f='',q=false;for(let i=0;i<t.length;i++){const c=t[i];
+ if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}
+ else if(c=='"')q=true;else if(c==','){r.push(f);f=''}else if(c=='\n'){r.push(f);R.push(r);r=[];f=''}else if(c!='\r')f+=c}
+ if(f!==''||r.length){r.push(f);R.push(r)}return R.filter(x=>x.length>1||x[0]!=='')}
+function build(){IDX={};IDX2={};const b=ci('バーコード文字列');if(b<0)return;
+ S.rows.forEach((r,i)=>(r.c[b]||'').split('|').filter(Boolean).forEach(k=>{(IDX[k]=IDX[k]||[]).push(i);const k2=k.replace(/\s/g,'');(IDX2[k2]=IDX2[k2]||[]).push(i)}))}
+function ask(msg,ok){return new Promise(res=>{const d=$('#dlg2');d.innerHTML=`<p>${msg}</p><div class="row"><button class="d" id="ask_ok">${ok}</button><button class="s" id="ask_ng">キャンセル</button></div>`;
+ d.querySelector('#ask_ok').onclick=()=>{d.close();res(true)};d.querySelector('#ask_ng').onclick=()=>{d.close();res(false)};d.oncancel=()=>res(false);d.showModal()})}
+async function loadFiles(F){let H=S.h.length?S.h:null;const add=[];
+ for(const f of F){let t;try{t=new TextDecoder('utf-8',{fatal:true}).decode(f.buf)}catch(_){t=new TextDecoder('shift_jis').decode(f.buf)}
+  const R=parseCSV(t.replace(/^\uFEFF/,'')),h=R[0].map(x=>x.trim());
+  if(!h.includes('バーコード文字列')){alert(f.name+':「バーコード文字列」列がありません(枝番紐づけ済みCSVではありません)');continue}
+  if(H&&h.join()!==H.join()){alert(f.name+':列構成が他のCSVと違うため読み込めません');continue}
+  H=h;const stem=f.name.replace(/\.[^.]*$/,''),e1=h.indexOf('設備名'),e2=h.indexOf('負荷ｸﾞﾙｰﾌﾟ名');
+  R.slice(1).forEach(c=>add.push(newRow(c,(e1>=0&&c[e1])||(e2>=0&&c[e2])||stem)))}
+ if(!add.length)return;const eqs=[...new Set(add.map(r=>r.eq))],old=eqList();
+ if(S.rows.some(r=>eqs.includes(r.eq)&&(r.k||r.n!=null))&&!(await ask('読み込む設備('+eqs.join('、')+')には読取結果があります。置き換えるとその設備の結果は消えます。','置き換える')))return;
+ S.h=H;S.rows=S.rows.filter(r=>!eqs.includes(r.eq)).concat(add);
+ S.eqSel=S.eqSel.filter(e=>eqList().includes(e)).concat(eqs.filter(e=>!old.includes(e)));if(!S.eqSel.length)S.eqSel=eqList();
+ cur=null;build();await kvSet('base',{h:S.h,rows:S.rows.map(r=>({c:r.c,eq:r.eq}))});await saveNow();head();renderSlip();toast(eqs.length+'設備 / '+add.length+'行を読み込みました')}
+$('#file').onchange=async e=>{const F=await Promise.all([...e.target.files].map(async f=>({name:f.name,buf:await f.arrayBuffer()})));e.target.value='';await loadFiles(F);if($('#dlg').open)openCfg()};
+/* ---- 画面 ---- */
+function head(){const t=S.rows.length,d=S.rows.filter(r=>r.k).length;$('#prog').textContent=t?`確認 ${d}/${t}行 ・追加 ${S.extras.length}件`:'CSV未読込(⚙から読込)';
+ $('#eqb').textContent=t?'担当設備: '+(S.eqSel.length==eqList().length&&multi()?'全設備':S.eqSel.join('、'))+'  (変更)':'担当設備: -'}
+function upd(r){r.st=r.k?(r.n===num(g(r,QC()))?'一致':r.n===0?'欠品':'修正'):'未確認'}
+function toggle(i,on){const r=S.rows[i];r.k=!!on;if(on){if(r.n==null)r.n=num(g(r,QC()))}else r.n=null;r.t=now();upd(r);save();head()}
+function setN(i,v){const r=S.rows[i],nv=(v===''||v==null)?0:Math.max(0,parseInt(v)||0);if(nv===0){r.k=false;r.n=null}else{r.n=nv;r.k=true}r.t=now();upd(r);save();head();renderSlip()}
+function qF(el){el.dataset.o=el.value;el.value=''}
+function qB(el,i,mode){const v=el.value.trim();if(v===''){el.value=el.dataset.o||'';return}if(v===el.dataset.o)return;setN(i,v);if(mode)openList(mode,$('#lq').value)}
+const pk=r=>['受注番号','行','製造指示番号','品種','寸法Ｗ','寸法Ｈ'].map(n=>g(r,n)).join('|'),
+gk=r=>['受注番号','行','製造指示番号','予定日',QC()].map(n=>g(r,n)).join('|')+'|'+r.eq;
+/* ---- スキャン ---- */
+function okFmt(k){return k.length>=15&&k.length<=26&&/^\d{8} \d{5}\S/.test(k)}
+function onScan(raw){const k=norm(raw);if(!k)return;if(!okFmt(k)){toast('指定外のバーコードです(読取を無視しました)',3000,true);if(navigator.vibrate)navigator.vibrate([200,80,200]);return}if(!S.rows.length){toast('先にCSVを読み込んでください');return}
+ const k2=k.replace(/\s/g,''),ids=IDX[k]||(IDX2[k2]&&IDX2[k2].length?IDX2[k2]:null);
+ if(!ids){const ex=S.extras.find(e=>e.k===k&&e.type==='範囲外');if(ex){toast('未登録伝票として記録済み(枚数 '+ex.n+')');return}openUnreg(k);return}
+ proceed(k,ids)}
+function proceed(k,ids){const sel=new Set(S.eqSel),selIds=ids.filter(i=>sel.has(S.rows[i].eq)),slipEq=[...new Set(selIds.map(i=>S.rows[i].eq))],cnt={};
+ selIds.forEach(i=>{const p=pk(S.rows[i]);(cnt[p]=cnt[p]||new Set()).add(S.rows[i].eq)});
+ if(slipEq.length>1&&S.pick[k]!==undefined&&S.pick[k]!=='both'&&!slipEq.includes(S.pick[k]))delete S.pick[k];
+ if(slipEq.length>1&&S.pick[k]===undefined){openPick(k,ids,slipEq);return}
+ const ch=S.pick[k],mine=[],other=[];let skipped=0;
+ ids.forEach(i=>{const r=S.rows[i];if(!sel.has(r.eq)){other.push(i);return}
+  if(slipEq.length>1&&ch!=='both'&&ch!==r.eq){r.d=cnt[pk(r)].size>1?'重複(現物は'+ch+')':'';skipped++;return}
+  r.d=(slipEq.length>1&&ch==='both'&&cnt[pk(r)].size>1)?'重複(両設備に有)':'';mine.push(i)});
+ const grp={},one=[],b=ci('バーコード文字列');
+ mine.forEach(i=>{const r=S.rows[i];if((r.c[b]||'').indexOf('|')<0)one.push(i);else(grp[gk(r)]=grp[gk(r)]||[]).push(i)});
+ Object.values(grp).forEach(a=>{const m=a.find(i=>S.rows[i].as===k);if(m!==undefined){one.push(m);return}
+  const fr=a.find(i=>!S.rows[i].as&&!S.rows[i].k);if(fr!==undefined){S.rows[fr].as=k;one.push(fr)}else one.push(a[0])});
+ const prev=S.log.filter(l=>l.k===k),first=!prev.length;
+ if(first)one.forEach(i=>{const r=S.rows[i];if(!r.k)toggle(i,true)});
+ S.log.push({k,t:now()});cur={k,ids,sel:one,first,prevT:prev.length?prev[prev.length-1].t:'',other:other.length,skipped};save();head();renderSlip();
+ if(navigator.vibrate)navigator.vibrate(first?60:[80,60,80]);if(!first)toast('※以前に読取済みの伝票です')}
+function openPick(k,ids,eqs){pendK=k;window._ids=ids;$('#dlg').innerHTML=`<h3>この伝票はどの設備ですか?</h3><p class="mut">この伝票は複数の設備にまたがっています。この伝票(パレット)が属する設備を選んでください。選ばなかった設備の行は未確認のままになり、提出時に削除されます。</p>`+eqs.map((e,i)=>`<button style="width:100%;margin:3px 0" onclick="doPick(${i})">${esc(e)} の伝票</button>`).join('')+`<button class="s" style="width:100%;margin:3px 0" onclick="doPick(-1)">どちらも該当(両方で確認)</button><button class="s" style="width:100%;margin:3px 0" onclick="$('#dlg').close()">キャンセル</button>`;window._eqs=eqs;$('#dlg').showModal()}
+function doPick(i){S.pick[pendK]=i<0?'both':window._eqs[i];$('#dlg').close();proceed(pendK,window._ids)}
+function renderSlip(){const el=$('#slip');if(!cur){el.innerHTML='<p class="mut">伝票をスキャンすると行が出ます。初回は全行チェック済み。無い行はチェックを外してください。</p>';return}
+ if(!cur.sel.length){el.innerHTML=`<div class="ban">この伝票は担当外設備の行のみです(${cur.other}行)。担当設備の変更は上のボタンから。</div>`;return}
+ const rows=cur.sel.slice().sort((a,b)=>S.rows[a].eq.localeCompare(S.rows[b].eq)||num(g(S.rows[a],'行'))-num(g(S.rows[b],'行'))),r0=S.rows[rows[0]],m=multi();
+ let h=`<h3 style="margin:4px 0 0">${esc(g(r0,'製造指示番号'))}</h3><p class="mut">伝票 ${esc(g(r0,'伝票番号'))} / 受注 ${esc(g(r0,'受注番号'))}</p>`+
+ (cur.first?'<div class="ban" style="background:var(--ok)">初回読取:全行チェック済み。無い行はチェックを外してください。</div>':`<div class="ban"><span class="warn">※読取済みの伝票</span>(前回 ${esc(cur.prevT)})。自動チェックはしていません。必要な行をチェックしてください。</div>`)+
+ (S.pick[cur.k]!==undefined?`<p class="mut">設備選択: <b>${esc(S.pick[cur.k]==='both'?'両方':S.pick[cur.k])}</b> <button class="s" style="min-height:32px;padding:2px 10px" onclick="repick()">選び直す</button></p>`:'')+
+ (cur.other||cur.skipped?`<p class="mut">担当外 ${cur.other}行 / 他設備に現物あり ${cur.skipped}行 は非表示</p>`:'')+
+ `<div class="row"><button onclick="allChk(true)">全行チェック</button><button class="s" onclick="allChk(false)">全行取消</button></div><table><tr><th>✔<th>行<th>品種<th>W×H<th>数量<th>棚卸数</tr>`;
+ rows.forEach(i=>{const r=S.rows[i];h+=`<tr class="${r.st}"><td><input type="checkbox" ${r.k?'checked':''} onchange="toggle(${i},this.checked);renderSlip()"><td>${esc(g(r,'行'))}${m?`<div class="mut">${esc(r.eq)}</div>`:''}<td>${esc(g(r,'品種'))}<td>${fmt(g(r,'寸法Ｗ'))}×${fmt(g(r,'寸法Ｈ'))}<td>${fmt(g(r,QC()))}<td><input type="number" inputmode="numeric" min="0" value="${r.n??''}" onfocus="qF(this)" onblur="qB(this,${i})" onkeydown="if(event.key==='Enter')this.blur()"></tr>`});
+ el.innerHTML=h+'</table>'}
+async function repick(){const k=cur.k,ids=cur.ids;if(!await ask('この伝票の確認結果を取り消して、設備を選び直します。','選び直す'))return;
+ ids.forEach(i=>{const r=S.rows[i];if(S.eqSel.includes(r.eq)){r.k=false;r.n=null;r.st='未確認';r.d='';r.t=''}});
+ S.log=S.log.filter(l=>l.k!==k);delete S.pick[k];save();head();proceed(k,ids)}
+function allChk(on){cur.sel.forEach(i=>toggle(i,on));renderSlip()}
+$('#man').addEventListener('keydown',e=>{if(e.key==='Enter'){onScan(e.target.value);e.target.value=''}});
+/* ---- カメラ ---- */
+async function camToggle(){if(camOn){camStop();return}
+ if(!('BarcodeDetector' in window)){toast('この端末(ブラウザ)はカメラ読取に未対応です。手入力欄かBluetoothリーダーを使ってください',4000,true);return}
+ try{det=new BarcodeDetector({formats:['code_128']});stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280}}});
+  const v=$('#v');v.srcObject=stream;$('#cam').style.display='block';await v.play();camOn=true;$('#camb').textContent='カメラ OFF';loop()}
+ catch(e){camStop();toast(e.name==='NotAllowedError'?'カメラが許可されていません。Chromeのサイト設定で許可するか、https版で開いてください':'カメラを起動できません: '+e.message)}}
+function camStop(){camOn=false;if(stream)stream.getTracks().forEach(t=>t.stop());$('#cam').style.display='none';$('#camb').textContent='カメラ読取 ON'}
+async function loop(){if(!camOn)return;try{const c=await det.detect($('#v'));if(c.length){const v=c[0].rawValue,t=Date.now();if(v!==last||t-lastT>3000){last=v;lastT=t;onScan(v)}}}catch(e){}setTimeout(loop,150)}
+/* ---- 担当設備 ---- */
+function openEq(){const L=eqList();if(!L.length){toast('先にCSVを読み込んでください');return}
+ $('#dlg').innerHTML=`<h3>担当設備</h3><p class="mut">自分が棚卸する設備を選びます。1人で全設備を担当する場合は全部選択してください。</p>`+L.map((e,i)=>`<label style="display:block;margin:8px 0"><input type="checkbox" ${S.eqSel.includes(e)?'checked':''} onchange="eqChg()" value="${i}">${esc(e)}</label>`).join('')+`<div class="row"><button class="s" onclick="eqAll()">全選択</button><button onclick="$('#dlg').close()">閉じる</button></div>`;$('#dlg').showModal()}
+function eqChg(){const L=eqList();S.eqSel=[...$('#dlg').querySelectorAll('input:checked')].map(x=>L[+x.value]);save();head()}
+function eqAll(){S.eqSel=eqList();save();head();openEq()}
+/* ---- 未登録・伝票なし・追加記録 ---- */
+const eqSelHtml=()=>S.eqSel.length>1?`<select id="x_eq"><option value="">▼ 設備を選択してください</option>${S.eqSel.map(e=>`<option>${esc(e)}</option>`).join('')}</select>`:`<input id="x_eq" value="${esc(S.eqSel[0]||'')}" readonly>`;
+const fields=n=>`設備${eqSelHtml()}品種<input id="x_h" list="hl" autocomplete="off" value="${esc(n.hin||'')}"><datalist id="hl">${[...new Set(S.rows.map(r=>g(r,'品種')).filter(Boolean))].sort().map(x=>`<option value="${esc(x)}">`).join('')}</datalist>W寸法<input id="x_w" type="number" inputmode="numeric">H寸法<input id="x_ht" type="number" inputmode="numeric">枚数<input id="x_n" type="number" inputmode="numeric" value="${n.n||''}">`;
+function parseK(k){return{jyu:k.slice(0,8),den:k.slice(9,12)+'_'+k.slice(12,14),shiji:[k.slice(14,19).trim(),k.slice(19,21).trim(),k.slice(21).trim()].join('-')}}
+function openUnreg(k){pendK=k;const p=parseK(k);$('#dlg').innerHTML=`<h3>未登録の伝票</h3><p class="mut">読込データに無い伝票です(先行・遅延・保留など)。わかる範囲で入力してください。残りは後でPCで補完できます。</p><p><b>${esc(p.shiji)}</b> / 伝票 ${esc(p.den)} / 受注 ${esc(p.jyu)}</p>${fields({})}<div class="row"><button onclick="saveEx('範囲外')">記録</button><button class="s" onclick="$('#dlg').close()">キャンセル</button></div>`;$('#dlg').showModal()}
+function openNone(){if(!S.rows.length){toast('先にCSVを読み込んでください');return}pendK='';$('#dlg').innerHTML=`<h3>伝票なしガラス</h3>${fields({})}<div class="row"><button onclick="saveEx('伝票なし')">記録</button><button class="s" onclick="$('#dlg').close()">閉じる</button></div>`;$('#dlg').showModal()}
+function saveEx(type){const h=X('#x_h').value,w=X('#x_w').value,ht=X('#x_ht').value,n=X('#x_n').value;
+ if(!X('#x_eq').value){toast('設備を選択してください');return}
+ if(n===''||(type==='伝票なし'&&(!h||!w||!ht))){toast(type==='伝票なし'?'品種・W・H・枚数を入力してください':'枚数を入力してください');return}
+ const p=type==='範囲外'?parseK(pendK):{jyu:'',den:'',shiji:''};
+ S.extras.push({type,k:pendK,jyu:p.jyu,den:p.den,shiji:p.shiji,n:+n,hin:h,w,h:ht,eq:X('#x_eq').value,t:now()});if(type==='範囲外')S.log.push({k:pendK,t:now()});save();head();
+ if(type==='範囲外'){$('#dlg').close();toast('未登録伝票を記録しました')}else{toast('記録しました');X('#x_w').value='';X('#x_ht').value='';X('#x_n').value='';X('#x_w').focus()}}
+function openExtras(){const rows=S.extras.map((e,i)=>`<tr><td>${e.type}<td>${esc(e.eq)}<td>${esc(e.shiji)} ${esc(e.den)}<td>${esc(e.hin)} ${e.w?e.w+'×'+e.h:''}<td>${e.n}<td><button onclick="delEx(${i})">削除</button></tr>`).join('');
+ $('#dlg').innerHTML=`<h3>追加記録(${S.extras.length}件)</h3><table>${rows||'<tr><td>なし</tr>'}</table><div class="row"><button class="s" onclick="$('#dlg').close()">閉じる</button></div>`;$('#dlg').showModal()}
+function delEx(i){S.extras.splice(i,1);save();head();openExtras()}
+/* ---- 未確認/確認済 一覧 ---- */
+function openList(mode,q=''){const c=mode==='c',L=[];let nu=0,nc=0;
+ S.rows.forEach((r,i)=>{r.k?nc++:nu++;if(r.k===c&&(!q||(r.eq+g(r,'受注番号')+g(r,'製造指示番号')+g(r,'伝票番号')).includes(q)))L.push(i)});
+ const rows=L.slice(0,150).map(i=>{const r=S.rows[i];return`<tr class="${r.st}"><td>${esc(r.eq)}<br><b>${esc(g(r,'製造指示番号'))}</b> 行${esc(g(r,'行'))}<td>${esc(g(r,'伝票番号'))}<td>${esc(g(r,'品種'))} ${fmt(g(r,'寸法Ｗ'))}×${fmt(g(r,'寸法Ｈ'))}<td>${c?`<input type="number" inputmode="numeric" min="0" value="${r.n}" onfocus="qF(this)" onblur="qB(this,${i},'c')" onkeydown="if(event.key==='Enter')this.blur()"> / `:''}${fmt(g(r,QC()))}<td><button onclick="${c?`toggle(${i},false)`:`toggle(${i},true)`};openList('${mode}',$('#lq').value);renderSlip()">${c?'取消':'確認'}</button></tr>`}).join('');
+ $('#dlg').innerHTML=`<div class="row"><button class="${c?'s':''}" onclick="openList('u')">未確認 ${nu}</button><button class="${c?'':'s'}" onclick="openList('c')">確認済 ${nc}</button></div><input id="lq" placeholder="設備・指示番号・受注番号で絞り込み" value="${esc(q)}" onchange="openList('${mode}',this.value)"><p class="mut">${L.length}行(先頭150行表示)${c?'':'。バーコードが読めない伝票は「確認」で手動確認できます'}</p><table>${rows}</table><div class="row"><button class="s" onclick="$('#dlg').close()">閉じる</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
+/* ---- 設定・データ(誤操作防止のため別画面) ---- */
+function openCfg(){const L=eqList(),prog=L.map(e=>{const a=S.rows.filter(r=>r.eq===e);return`<tr><td>${esc(e)}<td>${a.length}<td>${a.filter(r=>r.k).length}</tr>`}).join('');
+ $('#dlg').innerHTML=`<h3>設定・データ</h3><button style="width:100%" onclick="$('#file').click()">CSV読込(複数選択可)</button><p class="mut">設備ごとのCSVを一度に選べます。同じ設備を読み込み直すと、その設備だけ置き換わります。</p>
+ <table><tr><th>設備<th>行数<th>確認済</tr>${prog||'<tr><td colspan=3>未読込</tr>'}</table>
+ <p style="margin:10px 0 2px">端末名(担当者名)</p><input id="dev" value="${esc(S.dev)}" onchange="S.dev=this.value;save()" placeholder="例: 山田スマホ">
+ <p style="margin:10px 0 2px">結果CSV出力</p><select id="scope"><option value="sel">担当設備のみ</option><option value="all">全設備</option></select>
+ <div class="row"><button onclick="doShare()">共有(Bluetooth等)</button><button class="s" onclick="doDl()">ダウンロード</button></div>
+ <hr><button class="d" style="width:100%" onclick="resetMarks()">読取結果をリセット(CSVは残す)</button><p class="mut">チェック・数量・追加記録・履歴を消して、最初からやり直します。</p><button class="d" style="width:100%;margin-top:6px" onclick="resetAll()">全データ消去(CSVも削除)</button><p class="mut">読み込んだCSVも含め、すべて消して初期状態に戻します。</p><div class="row"><button class="s" onclick="$('#dlg').close()">閉じる</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
+let SJ=null;
+function sjMap(){if(SJ)return SJ;SJ=new Map();const d=new TextDecoder('shift_jis');
+ for(let b=0;b<0x80;b++)SJ.set(String.fromCharCode(b),[b]);
+ for(let b=0xA1;b<=0xDF;b++){const s=d.decode(new Uint8Array([b]));if(!SJ.has(s))SJ.set(s,[b])}
+ for(let a=0x81;a<=0xFC;a++){if(a>0x9F&&a<0xE0)continue;for(let b=0x40;b<=0xFC;b++){if(b===0x7F)continue;const s=d.decode(new Uint8Array([a,b]));if(s.length===1&&s!=='\ufffd'&&!SJ.has(s))SJ.set(s,[a,b])}}
+ return SJ}
+function sjis(str){const m=sjMap(),o=[];let bad=0;for(const ch of str){const v=m.get(ch);if(v){for(const x of v)o.push(x)}else{o.push(63);bad++}}return{bytes:new Uint8Array(o),bad}}
+const q=v=>{v=String(v??'');return/[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
+function makeExport(scope){const e0=ci('設備名')>=0?ci('設備名'):ci('負荷ｸﾞﾙｰﾌﾟ名'),add=e0<0,sel=new Set(S.eqSel),n=S.h.length;
+ const H=S.h.concat(add?['設備名']:[],['棚卸数','状態','区分','読取時刻','端末','備考']),out=[H.map(q).join(',')];
+ S.rows.forEach(r=>{if(scope==='sel'&&!sel.has(r.eq))return;const c=r.c.slice();while(c.length<n)c.push('');if(add)c.push(r.eq);else if(!c[e0])c[e0]=r.eq;
+  out.push(c.concat([r.k?r.n:'',r.st,'通常',r.t,S.dev,r.d||'']).map(q).join(','))});
+ S.extras.forEach(e=>{if(scope==='sel'&&!sel.has(e.eq))return;const c=S.h.map(()=>''),set=(k,v)=>{const i=ci(k);if(i>=0)c[i]=v};
+  set('受注番号',e.jyu);set('製造指示番号',e.shiji);set('品種',e.hin);set('寸法Ｗ',e.w);set('寸法Ｈ',e.h);set('伝票番号',e.den);set('バーコード文字列',e.k);if(add)c.push(e.eq);else c[e0]=e.eq;
+  out.push(c.concat([e.n,'確認',e.type,e.t,S.dev,'']).map(q).join(',')) });
+ const d=new Date(),p=x=>String(x).padStart(2,'0');
+ const sj=sjis(out.join('\r\n'));
+ return{bad:sj.bad,blob:new Blob([sj.bytes],{type:'text/csv'}),name:`棚卸結果_${S.dev||'端末'}_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.csv`}}
+async function doShare(){await saveNow();const{blob,name,bad}=makeExport(X('#scope').value),f=new File([blob],name,{type:'text/csv'});
+ if(navigator.canShare&&navigator.canShare({files:[f]})){try{await navigator.share({files:[f],title:name});if(bad)toast('変換できない文字が'+bad+'個あり「?」にしました')}catch(e){if(e.name!=='AbortError')toast('共有に失敗しました: '+e.message)}return}toast('この環境では共有できません。ダウンロードを使ってください(https版で共有可)')}
+function doDl(){const{blob,name,bad}=makeExport(X('#scope').value),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();toast('出力しました: '+name+(bad?'(変換できない文字'+bad+'個を「?」に置換)':''))}
+async function resetMarks(){if(!await ask('読取結果(チェック・数量・追加記録・履歴)をすべて消して、最初からやり直します。読み込んだCSVは残ります。','リセットする'))return;
+ clearTimeout(tmr);S.rows.forEach(r=>{r.n=null;r.k=false;r.st='未確認';r.t='';r.as='';r.d=''});S.extras=[];S.log=[];S.pick={};cur=null;last='';
+ await saveNow();head();renderSlip();openCfg();toast('読取結果をリセットしました')}
+async function resetAll(){if(!await ask('読み込んだCSVと読取結果をすべて消します。元に戻せません。','全て消去する'))return;
+ clearTimeout(tmr);await kvDel();S={h:[],rows:[],extras:[],log:[],pick:{},eqSel:[],dev:''};IDX={};IDX2={};cur=null;last='';head();renderSlip();$('#dlg').close();toast('すべて消去しました')}
+init();
+if('serviceWorker' in navigator&&/^https?:/.test(location.protocol))navigator.serviceWorker.register('sw.js').catch(()=>{});
+if(typeof history!=='undefined'){const hp=()=>history.pushState({a:1},'',location.href);hp();
+ window.addEventListener('pointerdown',()=>{if(!window._pg){window._pg=1;hp()}},{once:true});
+ window.addEventListener('popstate',()=>{hp();const d=[...document.querySelectorAll('dialog')].find(x=>x.open);if(d)d.close();else toast('戻るボタンは無効です')});
+ window.addEventListener('beforeunload',e=>{if(S.rows.length){e.preventDefault();e.returnValue=''}})}
+</script></body></html>
