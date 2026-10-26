@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>棚卸スキャン v2.4</title>
+<title>棚卸スキャン v2.5</title>
 <link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon-192.png"><meta name="theme-color" content="#0a5cd6">
 <style>
 :root{--bg:#fff;--fg:#1a1a1a;--mut:#667;--bd:#ccd;--ac:#0a5cd6;--ok:#e6f6e6;--ng:#fde8e8;--md:#fff4d6}
@@ -13,7 +13,7 @@ button{background:var(--ac);color:#fff;border:0;min-height:44px}button.s{backgro
 #prog{font-weight:700}#cam{display:none;position:relative;height:15vh;min-height:84px;border-radius:8px;overflow:hidden;background:#000;margin:4px 0}
 #cam video{width:100%;height:100%;object-fit:cover}#cam::after{content:"";position:absolute;left:8%;right:8%;top:50%;border-top:2px solid rgba(255,60,60,.8)}
 table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--bd);padding:4px;text-align:left;font-size:14px}
-td input[type=number]{width:60px;padding:6px}td input[type=checkbox]{width:26px;height:26px;padding:0}td button{padding:2px 8px;min-height:32px;margin-left:4px}
+td input[type=number]{width:60px;padding:6px}td input[type=checkbox]{width:26px;height:26px;padding:0}td button{padding:2px 8px;min-height:32px;margin-left:4px;white-space:nowrap}td input[type=number]{max-width:56px}
 tr.一致{background:var(--ok)}tr.欠品{background:var(--ng)}tr.修正{background:var(--md)}
 .mut{color:var(--mut);font-size:13px;margin:2px 0}.warn{color:#d33;font-weight:700}.ban{padding:6px 8px;border-radius:8px;margin:4px 0;background:var(--md);font-size:14px}
 dialog{width:94%;max-width:600px;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:12px;padding:12px;max-height:90vh}
@@ -121,7 +121,7 @@ async function repick(){const k=cur.k,ids=cur.ids;if(!await ask('この伝票の
  ids.forEach(i=>{const r=S.rows[i];if(S.eqSel.includes(r.eq)){r.k=false;r.n=null;r.st='未確認';r.d='';r.t=''}});
  S.log=S.log.filter(l=>l.k!==k);delete S.pick[k];save();head();proceed(k,ids)}
 function allChk(on){cur.sel.forEach(i=>toggle(i,on));renderSlip()}
-$('#man').addEventListener('keydown',e=>{if(e.key==='Enter'){onScan(e.target.value);e.target.value=''}});
+$('#man').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const v=e.target.value;e.target.value='';onScan(v)}});
 /* ---- カメラ ---- */
 async function camToggle(){if(camOn){camStop();return}
  if(!('BarcodeDetector' in window)){toast('この端末(ブラウザ)はカメラ読取に未対応です。手入力欄かBluetoothリーダーを使ってください',4000,true);return}
